@@ -1,179 +1,235 @@
-// Pedestrians and foot police. Peds walk the town sidewalks along the highway
-// and flee from crime; foot cops chase the player on foot when wanted is high.
+// Rustline — people.js
+// Manusia: Rosa (pemain), pejalan kaki NPC, dan polisi jalan kaki.
+// Animasi jalan memakai legL/legR/armL/armR langsung (bukan `.legs`).
+// Pejalan kaki kabur saat ada kejahatan di dekatnya; polisi mengejar & memukul.
+
 import * as THREE from 'three';
-import { WORLD } from './config.js';
-import { clamp, dist2D, pick, range } from './random.js';
-import { collideCircle } from './city.js';
+import { CFG } from './config.js';
 
-const SHIRTS = [0xd95f4b, 0x4b8fd9, 0x7bc24b, 0xe8c832, 0x9e6fd9, 0xe8e8e8, 0x2a2d34, 0xd97b2e];
-const PANTS = [0x2a2d34, 0x4a3a28, 0x5a6a7a, 0x333333];
+const SKIN = [0xd8a078, 0xb87a52, 0x8a5a38, 0xe8b890];
+const SHIRT = [0xc23b2a, 0x2e6f6a, 0xd8a928, 0x4a6fa5, 0x7a4a8a, 0xe0d8c8, 0x3a3a3a];
 
-export function makePersonMesh(shirt, pants, cop = false) {
-  const group = new THREE.Group();
-  const shirtMat = new THREE.MeshLambertMaterial({ color: cop ? 0x1e3a6e : shirt });
-  const pantsMat = new THREE.MeshLambertMaterial({ color: cop ? 0x14263e : pants });
-  const skinMat = new THREE.MeshLambertMaterial({ color: 0xd9a986 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.75, 0.32), shirtMat);
-  body.position.y = 1.05;
-  body.castShadow = true;
-  group.add(body);
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), skinMat);
-  head.position.y = 1.65;
+function limb(w, h, d, color, x, y, z) {
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.9 })
+  );
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  return m;
+}
+
+// kind: 'player' | 'ped' | 'cop'
+export function makePerson(scene, kind, x, z, heading, seedColor) {
+  const g = new THREE.Group();
+  const skin = seedColor !== undefined ? SKIN[seedColor % SKIN.length] : SKIN[0];
+  const shirt = seedColor !== undefined ? SHIRT[seedColor % SHIRT.length] : 0xc23b2a;
+
+  let torsoColor = shirt;
+  let legsColor = 0x2a2a33;
+  let hatColor = null;
+  if (kind === 'cop') {
+    torsoColor = 0x1a2a4a;
+    legsColor = 0x14141c;
+    hatColor = 0x1a2a4a;
+  } else if (kind === 'player') {
+    torsoColor = 0xa83226; // jaket merah Rosa
+    legsColor = 0x2a2a33;
+    hatColor = 0x6a3a1a; // topi koboi
+  }
+
+  // torso (pivot di pinggang untuk ayunan)
+  const torso = limb(0.62, 0.75, 0.34, torsoColor, 0, 1.12, 0);
+  g.add(torso);
+
+  // kepala + topi
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.26, 12, 10),
+    new THREE.MeshStandardMaterial({ color: skin, roughness: 0.8 })
+  );
+  head.position.set(0, 1.72, 0);
   head.castShadow = true;
-  group.add(head);
-  if (cop) {
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.1, 0.38), new THREE.MeshLambertMaterial({ color: 0x0e1a2e }));
-    cap.position.y = 1.86;
-    group.add(cap);
-  } else {
-    const hair = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.12, 0.36), new THREE.MeshLambertMaterial({ color: 0x2a1c10 }));
-    hair.position.y = 1.84;
-    group.add(hair);
+  g.add(head);
+  if (hatColor !== null) {
+    const hat = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.42, 0.46, 0.09, 12),
+      new THREE.MeshStandardMaterial({ color: hatColor, roughness: 0.9 })
+    );
+    hat.position.set(0, 1.92, 0);
+    g.add(hat);
+    const hatTop = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.2, 0.24, 0.22, 10),
+      new THREE.MeshStandardMaterial({ color: hatColor, roughness: 0.9 })
+    );
+    hatTop.position.set(0, 2.02, 0);
+    g.add(hatTop);
   }
-  const legGeo = new THREE.BoxGeometry(0.2, 0.7, 0.22);
-  const legL = new THREE.Mesh(legGeo, pantsMat);
-  legL.position.set(-0.14, 0.35, 0);
-  const legR = new THREE.Mesh(legGeo, pantsMat);
-  legR.position.set(0.14, 0.35, 0);
-  group.add(legL);
-  group.add(legR);
-  const armGeo = new THREE.BoxGeometry(0.14, 0.65, 0.16);
-  const armL = new THREE.Mesh(armGeo, shirtMat);
-  armL.position.set(-0.36, 1.05, 0);
-  const armR = new THREE.Mesh(armGeo, shirtMat);
-  armR.position.set(0.36, 1.05, 0);
-  group.add(armL);
-  group.add(armR);
-  return { group, legL, legR, armL, armR };
-}
-
-function sidewalkPoint(random) {
-  // Along the highway sidewalks through town, or along a town cross street.
-  if (random() < 0.7) {
-    const side = random() < 0.5 ? 9 : -9;
-    return { x: range(random, WORLD.townMinX, WORLD.townMaxX), z: side };
+  // rambut Rosa: ponytail
+  if (kind === 'player') {
+    const hair = limb(0.16, 0.5, 0.16, 0x1a1210, 0, 1.55, -0.28);
+    g.add(hair);
   }
-  const street = random() < 0.5 ? -20 : 26;
-  return { x: range(random, WORLD.townMinX, WORLD.townMaxX), z: street + (random() < 0.5 ? 5 : -5) };
-}
 
-export function createPedestrians(scene, random, count) {
-  const peds = [];
-  for (let i = 0; i < count; i += 1) {
-    const p = sidewalkPoint(random);
-    const { group, legL, legR, armL, armR } = makePersonMesh(pick(random, SHIRTS), pick(random, PANTS), false);
-    group.position.set(p.x, 0, p.z);
-    scene.add(group);
-    const target = sidewalkPoint(random);
-    peds.push({
-      mesh: group, legL, legR, armL, armR,
-      x: p.x, z: p.z, heading: random() * Math.PI * 2,
-      speed: 1 + random() * 0.8,
-      target, state: 'walk', health: 100, walkPhase: random() * 10,
-      downTimer: 0,
-    });
+  // lengan & kaki — pivot di bahu / pinggul (geometri digeser ke bawah)
+  function arm(side) {
+    const pivot = new THREE.Group();
+    pivot.position.set(side * 0.38, 1.42, 0);
+    const mesh = limb(0.2, 0.72, 0.2, torsoColor, 0, -0.36, 0);
+    pivot.add(mesh);
+    g.add(pivot);
+    return pivot;
   }
-  return peds;
-}
+  function leg(side) {
+    const pivot = new THREE.Group();
+    pivot.position.set(side * 0.17, 0.78, 0);
+    const mesh = limb(0.24, 0.78, 0.24, legsColor, 0, -0.39, 0);
+    pivot.add(mesh);
+    g.add(pivot);
+    return pivot;
+  }
 
-export function createFootCop(scene, x, z) {
-  const { group, legL, legR, armL, armR } = makePersonMesh(0x1e3a6e, 0x14263e, true);
-  group.position.set(x, 0, z);
-  scene.add(group);
+  const armL = arm(-1);
+  const armR = arm(1);
+  const legL = leg(-1);
+  const legR = leg(1);
+
+  // pistol di tangan kanan (hanya pemain & polisi)
+  let gun = null;
+  if (kind === 'player' || kind === 'cop') {
+    gun = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.12, 0.34),
+      new THREE.MeshStandardMaterial({ color: 0x181818, roughness: 0.4, metalness: 0.6 })
+    );
+    gun.position.set(0, -0.72, 0.12);
+    armR.add(gun);
+  }
+
+  g.position.set(x, 0, z);
+  g.rotation.y = heading || 0;
+  scene.add(g);
+
   return {
-    mesh: group, legL, legR, armL, armR,
-    x, z, heading: 0, speed: 5.2, health: 50, state: 'chase',
-    punchTimer: 0, walkPhase: 0, cop: true,
+    group: g,
+    kind,
+    legL,
+    legR,
+    armL,
+    armR,
+    gun,
+    x,
+    z,
+    y: 0,
+    vy: 0,
+    heading: heading || 0,
+    hp: kind === 'cop' ? CFG.copHP : kind === 'player' ? CFG.playerHP : CFG.pedHP,
+    speed: 0,
+    walkPhase: 0,
+    moving: false,
+    // AI pejalan kaki
+    wanderTarget: null,
+    wanderWait: 0,
+    fleeing: false,
+    fleeUntil: 0,
+    // AI polisi
+    punchCooldown: 0,
+    bustedHold: 0,
+    // pemain
+    onGround: true,
   };
 }
 
-function animateWalk(person, dt, moving) {
-  person.walkPhase += dt * (moving ? 9 : 2);
-  const swing = moving ? Math.sin(person.walkPhase) * 0.5 : 0;
-  person.legL.rotation.x = swing;
-  person.legR.rotation.x = -swing;
-  person.armL.rotation.x = -swing * 0.7;
-  person.armR.rotation.x = swing * 0.7;
+// Ayunan lengan/kaki saat berjalan. phase maju dengan kecepatan.
+export function animateWalk(p, dt, speed) {
+  p.walkPhase += dt * speed * 1.9;
+  const amp = Math.min(0.85, 0.25 + speed * 0.06);
+  const s = Math.sin(p.walkPhase);
+  p.legL.rotation.x = s * amp;
+  p.legR.rotation.x = -s * amp;
+  p.armL.rotation.x = -s * amp * 0.8;
+  p.armR.rotation.x = s * amp * 0.8;
+  if (p.gun) {
+    // tangan kanan memegang pistol ke depan saat bersenjata
+    p.armR.rotation.x = -1.1;
+  }
 }
 
-export function stepPedestrians(peds, dt, random, colliders, crimePoint) {
-  for (const ped of peds) {
-    if (ped.state === 'down') {
-      ped.downTimer -= dt;
-      ped.mesh.rotation.x = -Math.PI / 2 + 0.2;
-      if (ped.downTimer <= 0) {
-        ped.state = 'walk';
-        ped.mesh.rotation.x = 0;
-        ped.health = 100;
-      }
-      continue;
-    }
-    if (crimePoint && dist2D(ped.x, ped.z, crimePoint.x, crimePoint.z) < 25) {
-      ped.state = 'flee';
-      ped.fleeFrom = { x: crimePoint.x, z: crimePoint.z };
-      ped.fleeTimer = 4;
-    }
-    let speed = ped.speed;
-    let tx;
-    let tz;
-    if (ped.state === 'flee') {
-      ped.fleeTimer -= dt;
-      const dx = ped.x - ped.fleeFrom.x;
-      const dz = ped.z - ped.fleeFrom.z;
-      const d = Math.hypot(dx, dz) || 1;
-      tx = ped.x + (dx / d) * 10;
-      tz = ped.z + (dz / d) * 10;
-      speed = 4.5;
-      if (ped.fleeTimer <= 0) ped.state = 'walk';
-    } else {
-      tx = ped.target.x;
-      tz = ped.target.z;
-      if (dist2D(ped.x, ped.z, tx, tz) < 2) ped.target = sidewalkPoint(random);
-    }
-    const dx = tx - ped.x;
-    const dz = tz - ped.z;
+export function idlePose(p) {
+  p.legL.rotation.x *= 0.8;
+  p.legR.rotation.x *= 0.8;
+  p.armL.rotation.x *= 0.8;
+  if (!p.gun) p.armR.rotation.x *= 0.8;
+  else p.armR.rotation.x = -1.1;
+}
+
+export function syncPersonMesh(p) {
+  p.group.position.set(p.x, p.y, p.z);
+  p.group.rotation.y = p.heading;
+}
+
+// Pejalan kaki: mengembara di trotoar kota; kabur dari titik kejahatan.
+export function updatePedestrian(p, dt, time, crimePoint) {
+  if (crimePoint && time < p.fleeUntil) {
+    // kabur menjauhi titik kejahatan
+    const dx = p.x - crimePoint.x;
+    const dz = p.z - crimePoint.z;
     const d = Math.hypot(dx, dz) || 1;
-    const want = Math.atan2(dx, dz);
-    let diff = want - ped.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    ped.heading += clamp(diff, -3 * dt, 3 * dt);
-    const nx = ped.x + Math.sin(ped.heading) * speed * dt;
-    const nz = ped.z + Math.cos(ped.heading) * speed * dt;
-    const resolved = collideCircle(colliders, nx, nz, 0.5);
-    ped.x = clamp(resolved.x, WORLD.townMinX - 5, WORLD.townMaxX + 5);
-    ped.z = clamp(resolved.z, WORLD.townMinZ - 5, WORLD.townMaxZ + 5);
-    ped.mesh.position.set(ped.x, 0, ped.z);
-    ped.mesh.rotation.y = ped.heading;
-    animateWalk(ped, dt, true);
+    const sp = 7.5;
+    p.x += (dx / d) * sp * dt;
+    p.z += (dz / d) * sp * dt;
+    p.heading = Math.atan2(dx, dz);
+    p.moving = true;
+    animateWalk(p, dt, sp);
+  } else if (p.wanderWait > 0) {
+    p.wanderWait -= dt;
+    p.moving = false;
+    idlePose(p);
+  } else if (p.wanderTarget) {
+    const dx = p.wanderTarget.x - p.x;
+    const dz = p.wanderTarget.z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.6) {
+      p.wanderTarget = null;
+      p.wanderWait = 1 + Math.random() * 3;
+    } else {
+      const sp = 1.6;
+      p.x += (dx / d) * sp * dt;
+      p.z += (dz / d) * sp * dt;
+      p.heading = Math.atan2(dx, dz);
+      p.moving = true;
+      animateWalk(p, dt, sp);
+    }
+  } else {
+    p.wanderTarget = {
+      x: -75 + Math.random() * 150,
+      z: (Math.random() < 0.5 ? -1 : 1) * (9.5 + Math.random() * 3),
+    };
   }
+  p.x = Math.max(-300, Math.min(300, p.x));
+  p.z = Math.max(-60, Math.min(60, p.z));
+  syncPersonMesh(p);
 }
 
-export function stepFootCop(cop, playerX, playerZ, playerInCar, dt, colliders) {
-  if (cop.health <= 0) return false;
-  const d = dist2D(cop.x, cop.z, playerX, playerZ);
-  if (playerInCar || d > 60) {
-    cop.mesh.position.set(cop.x, 0, cop.z);
-    animateWalk(cop, dt, false);
-    return false;
+// Polisi jalan kaki: kejar pemain, pukul bila dekat.
+export function updateCop(p, dt, player, onPunch) {
+  const dx = player.x - p.x;
+  const dz = player.z - p.z;
+  const d = Math.hypot(dx, dz);
+  p.punchCooldown -= dt;
+  if (d > 1.6) {
+    const sp = CFG.copSpeed;
+    p.x += (dx / d) * sp * dt;
+    p.z += (dz / d) * sp * dt;
+    p.heading = Math.atan2(dx, dz);
+    p.moving = true;
+    animateWalk(p, dt, sp);
+  } else {
+    p.moving = false;
+    // ayunan pukul
+    p.armR.rotation.x = -1.6 + Math.sin(p.walkPhase * 3) * 0.4;
+    if (p.punchCooldown <= 0) {
+      p.punchCooldown = 1.1;
+      if (onPunch) onPunch(p);
+    }
   }
-  const want = Math.atan2(playerX - cop.x, playerZ - cop.z);
-  let diff = want - cop.heading;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  cop.heading += clamp(diff, -4 * dt, 4 * dt);
-  const nx = cop.x + Math.sin(cop.heading) * cop.speed * dt;
-  const nz = cop.z + Math.cos(cop.heading) * cop.speed * dt;
-  const resolved = collideCircle(colliders, nx, nz, 0.5);
-  cop.x = resolved.x;
-  cop.z = resolved.z;
-  cop.mesh.position.set(cop.x, 0, cop.z);
-  cop.mesh.rotation.y = cop.heading;
-  animateWalk(cop, dt, true);
-  cop.punchTimer -= dt;
-  if (d < 1.6 && cop.punchTimer <= 0) {
-    cop.punchTimer = 1.0;
-    return true;
-  }
-  return false;
+  syncPersonMesh(p);
 }
