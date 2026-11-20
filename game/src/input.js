@@ -1,122 +1,123 @@
-// Keyboard + mouse input. WASD moves, mouse drag orbits the camera, and every
-// action key reports a pressed edge exactly once per keydown.
-export const ACTION_ENTER = 'enter';
-export const ACTION_PUNCH = 'punch';
-export const ACTION_SHOOT = 'shoot';
-export const ACTION_RELOAD = 'reload';
-export const ACTION_PAUSE = 'pause';
-export const ACTION_MUTE = 'mute';
-export const ACTION_HORN = 'horn';
-export const ACTION_JUMP = 'jump';
-export const ACTION_SPRINT = 'sprint';
+// Rustline — input.js
+// Status keyboard + mouse drag orbit + klik. Edge-triggered "pressed" untuk
+// aksi sekali tekan (E, F, R, P, M, H, Space lompat).
 
-const KEY_ACTIONS = {
-  KeyE: ACTION_ENTER,
-  KeyF: ACTION_PUNCH,
-  KeyR: ACTION_RELOAD,
-  KeyP: ACTION_PAUSE,
-  Escape: ACTION_PAUSE,
-  KeyM: ACTION_MUTE,
-  KeyH: ACTION_HORN,
-  Space: ACTION_JUMP,
-  ShiftLeft: ACTION_SPRINT,
-  ShiftRight: ACTION_SPRINT,
-};
-
-export function createInput(canvas) {
-  const keys = new Set();
-  const pressed = new Set();
-  let mouseDown = false;
-  let orbitDX = 0;
-  let orbitDY = 0;
-  let lastX = 0;
-  let lastY = 0;
-  let dragging = false;
-
-  function onKeyDown(event) {
-    if (event.repeat) return;
-    keys.add(event.code);
-    const action = KEY_ACTIONS[event.code];
-    if (action) pressed.add(action);
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
-      event.preventDefault();
-    }
-  }
-  function onKeyUp(event) {
-    keys.delete(event.code);
-  }
-  function onMouseDown(event) {
-    if (event.button === 0) {
-      mouseDown = true;
-      pressed.add(ACTION_SHOOT);
-    }
-    if (event.button === 2) {
-      dragging = true;
-      lastX = event.clientX;
-      lastY = event.clientY;
-    }
-  }
-  function onMouseUp(event) {
-    if (event.button === 0) mouseDown = false;
-    if (event.button === 2) dragging = false;
-  }
-  function onMouseMove(event) {
-    if (!dragging) return;
-    orbitDX += event.clientX - lastX;
-    orbitDY += event.clientY - lastY;
-    lastX = event.clientX;
-    lastY = event.clientY;
-  }
-  function onContextMenu(event) {
-    event.preventDefault();
-  }
-  function onBlur() {
-    keys.clear();
-    mouseDown = false;
-    dragging = false;
+export class Input {
+  constructor() {
+    this.keys = new Set();
+    this.pressed = new Set(); // ditekan sejak frame terakhir dibaca
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    this.mouseDown = false;
+    this.clicked = false; // klik kiri sejak frame terakhir
+    this.dragging = false;
+    this.lastX = 0;
+    this.lastY = 0;
+    this.enabled = true;
+    this._onKeyDown = (e) => {
+      if (!this.enabled) return;
+      if (e.repeat) return;
+      this.keys.add(e.code);
+      this.pressed.add(e.code);
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+        e.preventDefault();
+      }
+    };
+    this._onKeyUp = (e) => {
+      this.keys.delete(e.code);
+    };
+    this._onMouseDown = (e) => {
+      if (!this.enabled) return;
+      this.mouseDown = true;
+      this.dragging = true;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+      if (e.button === 0) this.clicked = true;
+    };
+    this._onMouseUp = () => {
+      this.mouseDown = false;
+      this.dragging = false;
+    };
+    this._onMouseMove = (e) => {
+      if (!this.dragging) return;
+      this.mouseDX += e.clientX - this.lastX;
+      this.mouseDY += e.clientY - this.lastY;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+    };
+    this._onBlur = () => {
+      this.keys.clear();
+      this.mouseDown = false;
+      this.dragging = false;
+    };
   }
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  canvas.addEventListener('mousedown', onMouseDown);
-  window.addEventListener('mouseup', onMouseUp);
-  window.addEventListener('mousemove', onMouseMove);
-  canvas.addEventListener('contextmenu', onContextMenu);
-  window.addEventListener('blur', onBlur);
+  attach(target) {
+    target = target || window;
+    target.addEventListener('keydown', this._onKeyDown);
+    target.addEventListener('keyup', this._onKeyUp);
+    target.addEventListener('mousedown', this._onMouseDown);
+    target.addEventListener('mouseup', this._onMouseUp);
+    target.addEventListener('mousemove', this._onMouseMove);
+    target.addEventListener('blur', this._onBlur);
+  }
 
-  return {
-    moveX() {
-      let x = 0;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-      return x;
-    },
-    moveY() {
-      let y = 0;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
-      return y;
-    },
-    sprint() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight');
-    },
-    handbrake() {
-      return keys.has('Space');
-    },
-    mouseHeld() {
-      return mouseDown;
-    },
-    takeOrbit() {
-      const out = { dx: orbitDX, dy: orbitDY };
-      orbitDX = 0;
-      orbitDY = 0;
-      return out;
-    },
-    wasPressed(action) {
-      return pressed.has(action);
-    },
-    endFrame() {
-      pressed.clear();
-    },
-  };
+  detach(target) {
+    target = target || window;
+    target.removeEventListener('keydown', this._onKeyDown);
+    target.removeEventListener('keyup', this._onKeyUp);
+    target.removeEventListener('mousedown', this._onMouseDown);
+    target.removeEventListener('mouseup', this._onMouseUp);
+    target.removeEventListener('mousemove', this._onMouseMove);
+    target.removeEventListener('blur', this._onBlur);
+  }
+
+  down(code) {
+    return this.keys.has(code);
+  }
+
+  // true sekali saja pada frame setelah tombol ditekan
+  wasPressed(code) {
+    return this.pressed.has(code);
+  }
+
+  // WASD / panah sebagai vektor -1..1 (x = kanan, y = maju)
+  moveVector() {
+    let x = 0;
+    let y = 0;
+    if (this.down('KeyA') || this.down('ArrowLeft')) x -= 1;
+    if (this.down('KeyD') || this.down('ArrowRight')) x += 1;
+    if (this.down('KeyW') || this.down('ArrowUp')) y += 1;
+    if (this.down('KeyS') || this.down('ArrowDown')) y -= 1;
+    return { x, y };
+  }
+
+  // delta mouse sejak frame lalu, lalu nol-kan
+  consumeMouse() {
+    const dx = this.mouseDX;
+    const dy = this.mouseDY;
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    return { dx, dy };
+  }
+
+  consumeClick() {
+    const c = this.clicked;
+    this.clicked = false;
+    return c;
+  }
+
+  // dipanggil di akhir tiap frame
+  endFrame() {
+    this.pressed.clear();
+    this.clicked = false;
+  }
+
+  clearAll() {
+    this.keys.clear();
+    this.pressed.clear();
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    this.clicked = false;
+  }
 }
