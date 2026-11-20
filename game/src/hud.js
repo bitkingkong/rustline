@@ -1,139 +1,227 @@
-// HUD: DOM readouts (cash, health, wanted stars, mission objective, banners) and
-// a 2D canvas minimap of the desert highway. All text is plain and readable.
-import { WORLD } from './config.js';
+// Rustline — hud.js
+// DOM HUD: uang, HP, bintang wanted, objektif, banner, layar judul/pause/game
+// over, dan minimap canvas 180x180. Semua teks Bahasa Indonesia.
 
-export function createHud() {
-  const el = (id) => document.getElementById(id);
-  const minimap = el('minimap');
-  const mctx = minimap.getContext('2d');
-  let bannerTimer = 0;
-  return {
-    setCash(value) {
-      el('cash').textContent = `$${Math.floor(value).toLocaleString('en-US')}`;
-    },
-    setHealth(value) {
-      const bar = el('health-fill');
-      bar.style.width = `${Math.max(0, Math.min(100, value))}%`;
-      bar.style.background = value > 50 ? '#7fb069' : value > 25 ? '#e8c832' : '#e65a4e';
-      el('health-text').textContent = `${Math.ceil(Math.max(0, value))}`;
-    },
-    setAmmo(ammo, reloading) {
-      el('ammo').textContent = reloading ? 'RELOAD…' : `Pistol ${ammo}`;
-    },
-    setWanted(stars) {
-      let out = '';
-      for (let i = 0; i < 5; i += 1) out += i < stars ? '★' : '☆';
-      el('wanted').textContent = out;
-      el('wanted').classList.toggle('hot', stars >= 3);
-    },
-    setObjective(text, timer) {
-      el('objective').textContent = text;
-      el('objective-timer').textContent = timer > 0 ? `${Math.ceil(timer)} dtk` : '';
-    },
-    setSpeed(speedKmh, driving) {
-      el('speed').textContent = driving ? `${Math.round(speedKmh)} km/j` : '';
-    },
-    setHint(text) {
-      el('hint').textContent = text;
-    },
-    banner(text, sub, seconds = 3) {
-      const b = el('banner');
-      el('banner-title').textContent = text;
-      el('banner-sub').textContent = sub || '';
-      b.classList.add('show');
-      bannerTimer = seconds;
-    },
-    tickBanner(dt) {
-      if (bannerTimer > 0) {
-        bannerTimer -= dt;
-        if (bannerTimer <= 0) el('banner').classList.remove('show');
+import { PLACES } from './config.js';
+
+export class HUD {
+  constructor() {
+    this.el = {};
+    const ids = [
+      'hud', 'money', 'hp-fill', 'hp-text', 'ammo', 'wanted', 'objective',
+      'objective-timer', 'minimap', 'banner', 'banner-title', 'banner-sub',
+      'crosshair', 'hint', 'speedo',
+      'screen-title', 'screen-pause', 'screen-over',
+      'btn-new', 'btn-continue', 'btn-resume', 'btn-save', 'btn-quit',
+      'btn-restart', 'over-title', 'over-sub', 'title-save-note', 'pause-save-note',
+    ];
+    for (const id of ids) {
+      this.el[id] = document.getElementById(id);
+    }
+    this.minimapCtx = this.el.minimap ? this.el.minimap.getContext('2d') : null;
+    this.bannerTimer = 0;
+    this._flashT = 0;
+  }
+
+  showGame() {
+    this.setScreen(null);
+    if (this.el.hud) this.el.hud.style.display = 'block';
+  }
+
+  hideGame() {
+    if (this.el.hud) this.el.hud.style.display = 'none';
+  }
+
+  setScreen(name) {
+    const map = {
+      title: 'screen-title',
+      pause: 'screen-pause',
+      over: 'screen-over',
+    };
+    for (const key of Object.keys(map)) {
+      const e = this.el[map[key]];
+      if (e) e.style.display = key === name ? 'flex' : 'none';
+    }
+    if (!name) {
+      for (const key of Object.keys(map)) {
+        const e = this.el[map[key]];
+        if (e) e.style.display = 'none';
       }
-    },
-    showScreen(name) {
-      for (const id of ['title-screen', 'pause-screen', 'busted-screen', 'wasted-screen']) {
-        el(id).classList.toggle('show', id === `${name}-screen`);
+    }
+  }
+
+  update(state) {
+    // state: {money, hp, maxHp, ammo, reserve, wanted, objective, timeLeft,
+    //  driving, speed, armed, muted, inVehicle}
+    if (this.el.money) this.el.money.textContent = '$' + Math.floor(state.money);
+    const hpPct = Math.max(0, Math.min(100, (state.hp / state.maxHp) * 100));
+    if (this.el['hp-fill']) {
+      this.el['hp-fill'].style.width = hpPct + '%';
+      this.el['hp-fill'].style.background = hpPct > 50 ? '#37c978' : hpPct > 25 ? '#e8a928' : '#d83a2e';
+    }
+    if (this.el['hp-text']) this.el['hp-text'].textContent = Math.ceil(state.hp) + ' HP';
+    if (this.el.ammo) {
+      this.el.ammo.textContent = state.armed ? `🔫 ${state.ammo} / ${state.reserve}` : '✊ Tinju';
+    }
+    if (this.el.wanted) {
+      let stars = '';
+      for (let i = 0; i < 5; i++) {
+        stars += i < state.wanted ? '★' : '☆';
       }
-      el('hud').classList.toggle('hidden', name === 'title');
-    },
-    setTitleStats(cash, missionsDone) {
-      el('title-stats').textContent = `Uang $${Math.floor(cash).toLocaleString('en-US')} · Misi selesai ${missionsDone}/3`;
-    },
-    setContinueVisible(visible) {
-      el('btn-continue').style.display = visible ? '' : 'none';
-    },
-    // Minimap: desert, highway, dirt roads, town, checkpoint, player, cars,
-    // police (flashing), mission marker.
-    drawMinimap(state) {
-      const size = 180;
-      const halfX = WORLD.halfX + 20;
-      const halfZ = WORLD.halfZ + 20;
-      const toMap = (x, z) => [((x + halfX) / (halfX * 2)) * size, ((z + halfZ) / (halfZ * 2)) * size];
-      mctx.fillStyle = '#3a2a1e';
-      mctx.fillRect(0, 0, size, size);
-      // Town block.
-      const [tx0, ty0] = toMap(WORLD.townMinX, WORLD.townMinZ);
-      const [tx1, ty1] = toMap(WORLD.townMaxX, WORLD.townMaxZ);
-      mctx.fillStyle = '#4a3826';
-      mctx.fillRect(tx0, ty0, tx1 - tx0, ty1 - ty0);
-      // Dirt roads.
-      mctx.strokeStyle = '#8a6238';
-      mctx.lineWidth = 2;
-      for (const dx of WORLD.dirtRoads) {
-        const [x1, y1] = toMap(dx, -halfZ);
-        const [x2, y2] = toMap(dx, halfZ);
-        mctx.beginPath(); mctx.moveTo(x1, y1); mctx.lineTo(x2, y2); mctx.stroke();
-      }
-      // Highway.
-      mctx.strokeStyle = '#2e3138';
-      mctx.lineWidth = 4;
-      const [hx1, hy1] = toMap(-halfX, 0);
-      const [hx2, hy2] = toMap(halfX, 0);
-      mctx.beginPath(); mctx.moveTo(hx1, hy1); mctx.lineTo(hx2, hy2); mctx.stroke();
-      // Checkpoint (red square).
-      const [ckx, cky] = toMap(WORLD.checkpoint.x, WORLD.checkpoint.z);
-      mctx.fillStyle = '#ff2020';
-      mctx.fillRect(ckx - 3, cky - 3, 6, 6);
-      // Mission marker.
-      if (state.missionTarget) {
-        const [mx, my] = toMap(state.missionTarget.x, state.missionTarget.z);
-        mctx.fillStyle = '#ffb03a';
-        mctx.beginPath();
-        mctx.moveTo(mx, my - 7); mctx.lineTo(mx + 6, my); mctx.lineTo(mx, my + 7); mctx.lineTo(mx - 6, my);
-        mctx.closePath(); mctx.fill();
-      }
-      // Traffic (yellow).
-      mctx.fillStyle = '#e8c832';
-      for (const car of state.traffic) {
-        const [x, y] = toMap(car.x, car.z);
-        mctx.fillRect(x - 1.5, y - 1.5, 3, 3);
-      }
-      // Police (flashing blue/red).
-      const flash = Math.floor(performance.now() / 300) % 2 === 0;
-      mctx.fillStyle = flash ? '#2040ff' : '#ff2020';
-      for (const car of state.policeCars) {
-        const [x, y] = toMap(car.x, car.z);
-        mctx.beginPath(); mctx.arc(x, y, 3.5, 0, Math.PI * 2); mctx.fill();
-      }
-      for (const cop of state.footCops) {
-        const [x, y] = toMap(cop.x, cop.z);
-        mctx.beginPath(); mctx.arc(x, y, 2.5, 0, Math.PI * 2); mctx.fill();
-      }
-      // Player arrow (white), rotated by heading.
-      const [px, py] = toMap(state.playerX, state.playerZ);
-      mctx.save();
-      mctx.translate(px, py);
-      mctx.rotate(Math.PI - state.playerHeading);
-      mctx.fillStyle = '#ffffff';
-      mctx.beginPath();
-      mctx.moveTo(0, -6); mctx.lineTo(4.5, 5); mctx.lineTo(-4.5, 5);
-      mctx.closePath(); mctx.fill();
-      mctx.restore();
-      mctx.strokeStyle = '#555c66';
-      mctx.lineWidth = 1;
-      mctx.strokeRect(0.5, 0.5, size - 1, size - 1);
-      mctx.fillStyle = '#9aa0a8';
-      mctx.font = 'bold 11px sans-serif';
-      mctx.fillText('N', size - 14, 14);
-    },
-  };
+      this.el.wanted.textContent = stars;
+      this.el.wanted.style.color = state.wanted >= 3 ? '#ff4a3a' : '#ffd23e';
+    }
+    if (this.el.objective) this.el.objective.textContent = state.objective || '';
+    if (this.el['objective-timer']) {
+      this.el['objective-timer'].textContent =
+        state.timeLeft > 0 ? `⏱ ${Math.ceil(state.timeLeft)} dtk` : '';
+    }
+    if (this.el.speedo) {
+      this.el.speedo.textContent = state.driving
+        ? `${Math.round(Math.abs(state.speed) * 3.6)} km/j`
+        : '';
+    }
+    if (this.el.crosshair) {
+      this.el.crosshair.style.display = state.armed && !state.driving ? 'block' : 'none';
+    }
+    if (this.el.hint) {
+      this.el.hint.textContent = state.driving
+        ? 'W/S gas-rem • A/D setir • Space rem tangan • E keluar • H klakson • P pause'
+        : 'WASD gerak • Shift lari • Space lompat • E masuk kendaraan • F pukul • Klik tembak • R reload • P pause';
+    }
+    if (this.bannerTimer > 0) {
+      this.bannerTimer -= 1 / 60;
+      if (this.bannerTimer <= 0 && this.el.banner) this.el.banner.style.display = 'none';
+    }
+  }
+
+  banner(title, sub, seconds) {
+    if (!this.el.banner) return;
+    this.el['banner-title'].textContent = title;
+    this.el['banner-sub'].textContent = sub || '';
+    this.el.banner.style.display = 'block';
+    this.bannerTimer = seconds || 3.5;
+  }
+
+  showGameOver(kind, money) {
+    this.setScreen('over');
+    if (this.el['over-title']) {
+      this.el['over-title'].textContent = kind === 'busted' ? 'BUSTED!' : 'WASTED!';
+    }
+    if (this.el['over-sub']) {
+      this.el['over-sub'].textContent =
+        kind === 'busted'
+          ? `Polisi menangkapmu di motel. Denda $${money}.`
+          : `Kamu tumbang dan dibangunkan di motel. Biaya $${money}.`;
+    }
+  }
+
+  setContinueAvailable(has) {
+    if (this.el['btn-continue']) {
+      this.el['btn-continue'].style.display = has ? 'inline-block' : 'none';
+    }
+    if (this.el['title-save-note']) {
+      this.el['title-save-note'].textContent = has
+        ? 'Save ditemukan — lanjutkan perjalanan Rosa.'
+        : 'Belum ada save. Mulai dari awal.';
+    }
+  }
+
+  setPauseNote(text) {
+    if (this.el['pause-save-note']) this.el['pause-save-note'].textContent = text || '';
+  }
+
+  // Minimap 180x180: highway, jalan tanah, landmark, pemain, kendaraan,
+  // polisi berkedip, checkpoint, marker misi.
+  drawMinimap(world, time) {
+    const ctx = this.minimapCtx;
+    if (!ctx) return;
+    const S = 180;
+    const scale = S / 660; // dunia x -330..330
+    const toX = (x) => S / 2 + x * scale;
+    const toY = (z) => S / 2 + z * scale;
+    ctx.clearRect(0, 0, S, S);
+    ctx.fillStyle = '#1a1210';
+    ctx.fillRect(0, 0, S, S);
+    // pasir
+    ctx.fillStyle = '#6a4a28';
+    ctx.fillRect(0, 0, S, S);
+    // jalan tanah
+    ctx.fillStyle = '#8a6238';
+    for (const dx of [-140, 140]) {
+      ctx.fillRect(toX(dx) - 2, 0, 4, S);
+    }
+    // highway
+    ctx.fillStyle = '#3a3a40';
+    ctx.fillRect(0, toY(0) - 3, S, 6);
+    ctx.fillStyle = '#d8a928';
+    for (let x = -300; x < 300; x += 16) {
+      ctx.fillRect(toX(x), toY(0) - 0.5, 5, 1);
+    }
+    // kota
+    ctx.strokeStyle = '#e0b47e';
+    ctx.strokeRect(toX(-80), toY(-24), 160 * scale, 48 * scale);
+    // landmark
+    const dot = (place, color, r) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(toX(place.x), toY(place.z), r || 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    dot(PLACES.warehouse, '#ffb347');
+    dot(PLACES.gasStation, '#37c978');
+    dot(PLACES.motel, '#ff9ec4');
+    dot(PLACES.hideout, '#8a5a8a');
+    // checkpoint
+    ctx.fillStyle = '#ff4a3a';
+    ctx.fillRect(toX(120) - 2, toY(0) - 2, 4, 4);
+    // marker misi (berlian kuning)
+    if (world.missions.target) {
+      const t = world.missions.target;
+      ctx.fillStyle = '#ffd23e';
+      ctx.beginPath();
+      ctx.moveTo(toX(t.x), toY(t.z) - 5);
+      ctx.lineTo(toX(t.x) + 5, toY(t.z));
+      ctx.lineTo(toX(t.x), toY(t.z) + 5);
+      ctx.lineTo(toX(t.x) - 5, toY(t.z));
+      ctx.closePath();
+      ctx.fill();
+    }
+    // traffic (putih)
+    for (const v of world.traffic) {
+      ctx.fillStyle = '#e8e8e8';
+      ctx.fillRect(toX(v.x) - 1, toY(v.z) - 1, 2, 2);
+    }
+    // mobil polisi (berkedip merah/biru)
+    this._flashT += 0.12;
+    const flash = Math.sin(this._flashT * 6) > 0;
+    for (const p of world.policeCars) {
+      ctx.fillStyle = flash ? '#ff2a2a' : '#2a5cff';
+      ctx.beginPath();
+      ctx.arc(toX(p.x), toY(p.z), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (const c of world.cops) {
+      ctx.fillStyle = flash ? '#ff2a2a' : '#2a5cff';
+      ctx.fillRect(toX(c.x) - 1.5, toY(c.z) - 1.5, 3, 3);
+    }
+    // pemain (panah hijau)
+    const px = toX(world.player.x);
+    const py = toY(world.player.z);
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(-world.player.heading);
+    ctx.fillStyle = '#37ff7a';
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(4, 5);
+    ctx.lineTo(-4, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    // bingkai
+    ctx.strokeStyle = '#ffb347';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, S - 2, S - 2);
+  }
 }
