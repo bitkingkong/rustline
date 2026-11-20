@@ -1,108 +1,118 @@
-// Boot and the one loop: the world advances in fixed 1/60 s steps (several in a
-// slow frame, none in a fast one) and the renderer paints what is there. The game
-// moves between title, play, paused, busted and wasted screens.
-//
-// ?shot=start|drive|chase|mission (with &seed=N) stages that scene instead of
-// running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { createWorld } from './world.js';
-import { stageShot } from './shots.js';
+// Rustline — main.js
+// Boot + loop + mode screenshot deterministik.
+// Alur: judul (Continue / New Game) -> bermain -> pause (Save) -> game over.
+// Mode shot: ?shot=start|drive|chase|mission&seed=N — menyiapkan adegan,
+// menjalankan beberapa frame staging (render:false), lalu menandai
+// window.__shotReady setelah frame pertama dirender.
+
+import { World } from './world.js';
+import { applyShot } from './shots.js';
 
 const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const shotName = params.get('shot');
+const seed = params.get('seed') || 'rustline-1';
 
 const canvas = document.getElementById('game');
-const errBox = document.getElementById('err');
+const world = new World(canvas, seed);
+window.__world = world;
+window.__shotReady = false;
 
-window.addEventListener('error', (event) => {
-  const message = String((event && event.message) || 'unknown error');
-  window.__error = message;
-  if (errBox) errBox.textContent = message;
-});
-window.addEventListener('unhandledrejection', (event) => {
-  const message = String((event && event.reason && event.reason.message) || event.reason || 'unhandled rejection');
-  window.__error = message;
-  if (errBox) errBox.textContent = message;
-});
+const hud = world.hud;
 
-const world = createWorld(canvas, seed);
-
-function wire(id, fn) {
-  const button = document.getElementById(id);
-  if (button) button.addEventListener('click', fn);
+function startNewGame() {
+  world.audio.ensure();
+  world.newGame();
 }
 
-wire('btn-new', () => {
-  world.audio.unlock();
-  world.startGame(true);
-});
-wire('btn-continue', () => {
-  const save = world.loadGame();
-  if (save) world.applySave(save);
-  world.audio.unlock();
-  world.startGame(false);
-});
-wire('btn-resume', () => {
-  world.state.screen = 'play';
-  world.hud.showScreen('play');
-});
-wire('btn-save', () => {
-  if (world.saveGame()) {
-    document.getElementById('save-note').textContent = 'Tersimpan.';
+function continueGame() {
+  world.audio.ensure();
+  if (world.load()) {
+    world.state = 'playing';
+    hud.showGame();
+    hud.banner('LANJUTKAN', 'Selamat datang kembali, Rosa.', 3);
   } else {
-    document.getElementById('save-note').textContent = 'Gagal menyimpan (storage mati).';
+    startNewGame();
   }
-});
-wire('btn-restart', () => window.location.reload());
-wire('btn-busted', () => world.respawn(100));
-wire('btn-wasted', () => world.respawn(50));
+}
 
-window.addEventListener('resize', () => {
-  world.cameraRig.resize();
-  world.renderer.setSize(window.innerWidth, window.innerHeight);
+function resumeGame() {
+  world.audio.ensure();
+  world.state = 'playing';
+  hud.showGame();
+}
+
+function quitToTitle() {
+  if (world.inVehicle) world.exitVehicle();
+  world.clearPolice();
+  world.wanted = 0;
+  world.state = 'title';
+  world.audio.setSiren(false);
+  world.audio.setEngine(0, false);
+  hud.hideGame();
+  hud.setScreen('title');
+  hud.setContinueAvailable(world.hasSave());
+}
+
+// ---- wiring tombol ----
+function bind(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', fn);
+}
+bind('btn-new', startNewGame);
+bind('btn-continue', continueGame);
+bind('btn-resume', resumeGame);
+bind('btn-save', () => {
+  const ok = world.save();
+  hud.setPauseNote(ok ? '✓ Tersimpan — lanjutkan kapan saja.' : 'Gagal menyimpan.');
+});
+bind('btn-quit', quitToTitle);
+bind('btn-restart', () => {
+  hud.setScreen(null);
+  startNewGame();
 });
 
-if (shot) {
-  try {
-    stageShot(shot, world);
-    let painted = 0;
-    const paint = () => {
-      world.step(0);
-      painted += 1;
-      if (painted < 2) requestAnimationFrame(paint);
-      else {
-        window.__shotReady = true;
-        document.documentElement.setAttribute('data-shot-ready', 'true');
-      }
-    };
-    requestAnimationFrame(paint);
-  } catch (error) {
-    const message = String((error && error.stack) || error);
-    window.__shotError = message;
-    if (errBox) errBox.textContent = message;
+// klik pertama di mana saja = gestur audio
+window.addEventListener('pointerdown', () => world.audio.ensure(), { once: true });
+window.addEventListener('keydown', () => world.audio.ensure(), { once: true });
+
+// ---- mode screenshot ----
+let shotMode = null;
+let shotFrames = 0;
+if (shotName) {
+  shotMode = applyShot(world, shotName);
+  // staging: majukan dunia beberapa langkah tanpa render agar adegan stabil
+  for (let i = 0; i < 24; i++) {
+    world.step(0.05, { render: false });
+  }
+  if (shotMode === 'title') {
+    world.state = 'title';
+    hud.setScreen('title');
+  } else {
+    hud.showGame();
+    hud.setScreen(null);
   }
 } else {
-  const save = world.loadGame();
-  world.hud.setContinueVisible(!!save);
-  if (save) world.hud.setTitleStats(save.cash || 0, (save.completed || []).length);
-  world.state.screen = 'title';
-  world.hud.showScreen('title');
-  let last = performance.now();
-  let accumulator = 0;
-  const STEP = 1 / 60;
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const dt = Math.min(0.25, (now - last) / 1000);
-    last = now;
-    accumulator += dt;
-    let n = 0;
-    while (accumulator >= STEP && n < 5) {
-      world.step(STEP);
-      accumulator -= STEP;
-      n += 1;
-    }
-    if (n === 5) accumulator = 0;
-  }
-  requestAnimationFrame(frame);
+  world.state = 'title';
+  hud.setScreen('title');
+  hud.setContinueAvailable(world.hasSave());
 }
+
+window.__gameReady = true;
+
+// ---- loop utama ----
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
+  last = now;
+  // resume dari pause lewat P / Esc (dicek sebelum step mengosongkan pressed)
+  if (world.state === 'paused' && (world.input.wasPressed('KeyP') || world.input.wasPressed('Escape'))) {
+    resumeGame();
+  }
+  world.step(dt);
+  if (shotMode) {
+    shotFrames += 1;
+    if (shotFrames >= 5) window.__shotReady = true;
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
